@@ -728,7 +728,8 @@ def update_results_log(results_log_path, model_name, results_dict):
         os.remove(f"{results_log_path}.temp")
 
 
-def tfrecord_heatmap(tfrecord, slide, tile_px, tile_um, tile_dict, outdir):
+def tfrecord_heatmap(tfrecord, slide, tile_px, tile_um, tile_dict, outdir,
+                     interpolation='bicubic'):
     """Creates a tfrecord-based WSI heatmap using a dictionary of tile values
     for heatmap display.
 
@@ -859,7 +860,7 @@ def tfrecord_heatmap(tfrecord, slide, tile_px, tile_um, tile_dict, outdir):
         zorder=10,
         alpha=0.6,
         extent=grid_extent,
-        interpolation='bicubic',
+        interpolation=interpolation,
         cmap='coolwarm',
         norm=divnorm
     )

@@ -220,7 +220,7 @@ class _ModelParams:
     def load_dict(self, hp_dict):
         for key, value in hp_dict.items():
             if not hasattr(self, key):
-                log.error(f'Unrecognized hyperparameter {key}; unable to load')
+                log.error(f'Unrecognized hyperparameter {key}')
             try:
                 setattr(self, key, value)
             except Exception:

@@ -275,6 +275,11 @@ class ModelParams(_base._ModelParams):
         else:
             merged_model = tile_image_model.output
 
+        # Add slide prediction layers
+        #slide_predictor, _ = self._add_hidden_layers(merged_model, None)
+        #slide_prelogits = tf.keras.layers.Dense(193, name='slide_prelogits')(slide_predictor)
+        #slide_logits = tf.keras.layers.Activation('softmax', dtype='float32', name='slide_logits')(slide_prelogits)
+
         # Add hidden layers
         regularizer = self._get_dense_regularizer()
         merged_model, last_linear = self._add_hidden_layers(merged_model, regularizer)
@@ -299,6 +304,8 @@ class ModelParams(_base._ModelParams):
         # Disable experimental batch loss
         if False:
             model.add_loss(tf_utils.batch_loss_crossentropy(last_linear))
+        #if True:
+        #    model.add_loss(-1 * tf.keras.losses.sparse_categorical_crossentropy(slide_logits))
 
         if checkpoint:
             log.info(f'Loading checkpoint weights from {col.green(checkpoint)}')
@@ -1149,7 +1156,8 @@ class Trainer:
             if resume_training:
                 self.model = tf.keras.load_model(resume_training)
             else:
-                model = self.hp.build_model(labels=self.labels,
+                model = self.hp.build_model(labels=self.labels if self.labels else None,
+                                            num_classes=self.num_classes if not self.labels else None,
                                             num_slide_features=self.num_slide_features,
                                             pretrain=pretrain,
                                             checkpoint=checkpoint)
@@ -1281,6 +1289,58 @@ class Trainer:
                 self.neptune_run.stop()
 
             return results
+
+
+class TileTrainer(Trainer):
+
+    _model_type = 'categorical'
+
+    def __init__(self, hp, outdir, labels, patients, **kwargs):
+        super().__init__(hp, outdir, {}, patients, **kwargs)
+        self.num_classes = 2
+        with tf.device('/cpu'):
+            self.annotations_tables = [
+                tf.lookup.StaticHashTable(
+                    tf.lookup.KeyValueTensorInitializer(
+                        labels,
+                        tf.constant(np.array([1 for _ in range(len(labels))], dtype=np.int64))
+                    ),
+                    default_value=0
+                )
+            ]
+
+    def _interleave_kwargs(self, **kwargs):
+        args = types.SimpleNamespace(
+            labels=self._parse_tfrecord_labels,
+            normalizer=self.normalizer,
+            parse_loc=True,
+            **kwargs
+        )
+        return vars(args)
+
+    def _parse_tfrecord_labels(self, image, slide, loc_x, loc_y):
+        '''Parses raw entry read from TFRecord.'''
+
+        image_dict = {'tile_image': image}
+        key = tf.strings.join(
+            (
+                slide,
+                tf.strings.as_string(loc_x),
+                tf.strings.as_string(loc_y)
+            ),
+            separator='-')
+
+        label = self.annotations_tables[0].lookup(key)
+
+        # Add additional non-image feature inputs if indicated,
+        #     excluding the event feature used for CPH models
+        if self.num_slide_features:
+            def slide_lookup(s): return self.slide_input[s.numpy().decode('utf-8')]
+            num_features = self.num_slide_features
+            slide_feature_input_val = tf.py_function(func=slide_lookup, inp=[slide], Tout=[tf.float32] * num_features)
+            image_dict.update({'slide_feature_input': slide_feature_input_val})
+
+        return image_dict, label
 
 
 class LinearTrainer(Trainer):

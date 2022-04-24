@@ -252,7 +252,7 @@ def interleave(tfrecords, img_size, batch_size, prob_weights=None, clip=None,
                labels=None, incl_slidenames=False, incl_loc=False,
                infinite=True, augment=False, standardize=True, normalizer=None,
                num_shards=None, shard_idx=None, num_parallel_reads=4,
-               deterministic=False, drop_last=False):
+               deterministic=False, drop_last=False, parse_loc=False):
 
     """Generates an interleaved dataset from a collection of tfrecord files,
     sampling from tfrecord files randomly according to balancing if provided.
@@ -321,7 +321,7 @@ def interleave(tfrecords, img_size, batch_size, prob_weights=None, clip=None,
 
     with tf.device('cpu'):
         # --- Get the base TFRecord parser, based on the first tfrecord -------
-        if not incl_loc:
+        if not (incl_loc or parse_loc):
             features_to_return = ('image_raw', 'slide')
         else:
             features_to_return = ('image_raw', 'slide', 'loc_x', 'loc_y')
@@ -366,8 +366,26 @@ def interleave(tfrecords, img_size, batch_size, prob_weights=None, clip=None,
             label_parser=label_parser,
             include_slidenames=incl_slidenames,
             include_loc=incl_loc,
+            parse_loc=parse_loc,
             deterministic=deterministic
         )
+
+        if parse_loc:
+            def filter0(*args):
+                matching = tf.math.equal(args[1], 0)
+                return matching
+
+            def filter1(*args):
+                matching = tf.math.equal(args[1], 1)
+                return matching
+
+            out1 = dataset.filter(filter0)
+            out2 = dataset.filter(filter1)
+            dataset = tf.data.experimental.sample_from_datasets(
+                (out1, out2),
+                weights=(0.2, 0.8)
+            )
+
         # ------- Apply normalization -----------------------------------------
         if normalizer and normalizer.vectorized:
             log.info("Using fast, vectorized normalization")
@@ -407,14 +425,21 @@ def interleave(tfrecords, img_size, batch_size, prob_weights=None, clip=None,
 
 def _get_parsed_datasets(tfrecord_dataset, base_parser, label_parser=None,
                          include_slidenames=False, include_loc=False,
-                         deterministic=False):
+                         deterministic=False, parse_loc=False):
 
     def final_parser(record):
-        if include_loc:
+        if include_loc or parse_loc:
             image, slide, loc_x, loc_y = base_parser(record)
         else:
             image, slide = base_parser(record)
-        image, label = label_parser(image, slide) if label_parser else (image, None)
+
+        if label_parser is not None:
+            if parse_loc:
+                image, label = label_parser(image, slide, loc_x, loc_y)
+            else:
+                image, label = label_parser(image, slide)
+        else:
+            label = None
 
         to_return = [image, label]
         if include_slidenames:
