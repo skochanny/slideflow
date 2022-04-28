@@ -1,18 +1,29 @@
 import random
 import slideflow as sf
 from slideflow.util import log
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import neptune.new as neptune
+    from slideflow import Dataset
 
 
 class NeptuneLog:
     '''Creates neptune runs and assists with run logging.'''
 
-    def __init__(self, api_token, workspace):
+    def __init__(self, api_token: str, workspace: str) -> None:
         '''Initializes with a given Neptune API token and workspace name.'''
 
         self.api_token = api_token
         self.workspace = workspace
 
-    def start_run(self, name, project, dataset, tags=None):
+    def start_run(
+        self,
+        name: str,
+        project: str,
+        dataset: "Dataset",
+        tags: Optional[List[str]] = None
+    ) -> "neptune.Run":
         '''Starts a neptune run'''
 
         import neptune.new as neptune
@@ -37,15 +48,16 @@ class NeptuneLog:
         self.run['data/annotations_file'] = dataset.annotations_file
         return self.run
 
-    def log_config(self, hp_data, stage):
+    def log_config(self, hp_data: Dict, stage: str) -> None:
         '''Logs model hyperparameter data according to the given stage
         ('train' or 'eval')'''
 
         proj_keys = ['dataset_config', 'sources']
         model_keys = ['model_name', 'model_type', 'k_fold_i', 'outcomes']
         if not hasattr(self, 'run'):
-            msg = "Neptune run not yet initialized (start with start_run())"
-            raise ValueError(msg)
+            raise ValueError(
+                "Neptune run not yet initialized (start with start_run())"
+            )
         for model_info_key in model_keys:
             self.run[model_info_key] = hp_data[model_info_key]
         outcomes = {
@@ -57,30 +69,35 @@ class NeptuneLog:
             for key in hp_data.keys()
             if 'validation' in key
         }
-        self.run['stage'] = hp_data['stage']
         self.run['backend'] = sf.backend()
         self.run['project_info'] = {key: hp_data[key] for key in proj_keys}
         self.run['outcomes'] = outcomes
         self.run['model_params/validation'] = validation_params
-        self.run['model_params/hp'] = hp_data['hp']
-        self.run['model_params/hp/pretrain'] = hp_data['pretrain']
-        self.run['model_params/resume_training'] = hp_data['resume_training']
-        self.run['model_params/checkpoint'] = hp_data['checkpoint']
-        self.run['model_params/filters'] = hp_data['filters']
-
+        self._log_hp(hp_data, 'stage', 'stage')
+        self._log_hp(hp_data, 'model_params/hp', 'hp')
+        self._log_hp(hp_data, 'model_params/hp/pretrain', 'pretrain')
+        self._log_hp(hp_data, 'model_params/resume_training', 'resume_training')
+        self._log_hp(hp_data, 'model_params/checkpoint', 'checkpoint')
+        self._log_hp(hp_data, 'model_params/filters', 'filters')
         if stage == 'train':
-            self.run['input_features'] = hp_data['input_features']
-            self.run['input_feature_labels'] = hp_data['input_feature_labels']
-            self.run['model_params/max_tiles'] = hp_data['max_tiles']
-            self.run['model_params/min_tiles'] = hp_data['min_tiles']
-            self.run['full_model_name'] = hp_data['full_model_name']
+            self._log_hp(hp_data, 'input_features', 'input_features')
+            self._log_hp(hp_data, 'input_feature_labels', 'input_feature_labels')
+            self._log_hp(hp_data, 'model_params/max_tiles', 'max_tiles')
+            self._log_hp(hp_data, 'model_params/min_tiles', 'min_tiles')
+            self._log_hp(hp_data, 'full_model_name', 'full_model_name')
         else:
-            self.run['eval/dataset'] = hp_data['sources']
-            self.run['eval/min_tiles'] = hp_data['min_tiles']
-            self.run['eval/max_tiles'] = hp_data['max_tiles']
+            self._log_hp(hp_data, 'eval/dataset', 'sources')
+            self._log_hp(hp_data, 'eval/min_tiles', 'min_tiles')
+            self._log_hp(hp_data, 'eval/max_tiles', 'max_tiles')
+
+    def _log_hp(self, hp_data, run_key, hp_key) -> None:
+        try:
+            self.run[run_key] = hp_data[hp_key]
+        except KeyError:
+            log.debug(f"Unable to log Neptune hp_data key '{hp_key}'")
 
 
-def list_log(run, label, val, **kwargs):
+def list_log(run: "neptune.Run", label: str, val: Any, **kwargs: Any) -> None:
     # If only one value for a metric, log to .../[metric]
     # If more than one value for a metric (e.g. AUC for each category),
     # log to .../[metric]/[i]
