@@ -4,59 +4,20 @@ import json
 import os
 import csv
 import numpy as np
-from typing import Union, List, Optional, Dict, Any, TYPE_CHECKING
-
 import slideflow as sf
 from slideflow.util import log
 from slideflow import errors
 
-if TYPE_CHECKING:
-    from slideflow.norm import StainNormalizer
-
-
 class _ModelParams:
     """Build a set of hyperparameters."""
 
-    ModelDict = {}  # type: Dict
-    LinearLossDict = {}  # type: Dict
-
-    def __init__(
-        self,
-        *,
-        tile_px: int = 299,
-        tile_um: int = 302,
-        epochs: Union[int, List[int]] = 3,
-        toplayer_epochs: int = 0,
-        model: str = 'xception',
-        pooling: str = 'max',
-        loss: str = 'sparse_categorical_crossentropy',
-        learning_rate: float = 0.0001,
-        learning_rate_decay: float = 0,
-        learning_rate_decay_steps: float = 100000,
-        batch_size: int = 16,
-        hidden_layers: int = 0,
-        hidden_layer_width: int = 500,
-        optimizer: str = 'Adam',
-        early_stop: bool = False,
-        early_stop_patience: int = 0,
-        early_stop_method: str = 'loss',
-        manual_early_stop_epoch: Optional[int] = None,
-        manual_early_stop_batch: Optional[int] = None,
-        uq: bool = False,
-        training_balance: Optional[str] = 'auto',
-        validation_balance: Optional[str] = 'none',
-        trainable_layers: int = 0,
-        l1: Optional[float] = 0,
-        l2: Optional[float] = 0,
-        l1_dense: Optional[float] = 0,
-        l2_dense: Optional[float] = 0,
-        dropout: Optional[float] = 0,
-        augment: Optional[str] = 'xyrj',
-        normalizer: Optional[str] = None,
-        normalizer_source: Optional[str] = None,
-        include_top: bool = True,
-        drop_images: bool = False
-    ) -> None:
+    def __init__(self, tile_px=299, tile_um=302, epochs=3, toplayer_epochs=0, model='xception', pooling='max',
+                 loss='sparse_categorical_crossentropy', learning_rate=0.0001, learning_rate_decay=0,
+                 learning_rate_decay_steps=100000, batch_size=16, hidden_layers=0, hidden_layer_width=500,
+                 optimizer='Adam', early_stop=False, early_stop_patience=0, early_stop_method='loss',
+                 training_balance='auto', validation_balance='none', trainable_layers=0, l1=0, l2=0, l1_dense=None,
+                 l2_dense=None, dropout=0, uq=False, augment='xyrj', normalizer=None, normalizer_source=None,
+                 include_top=True, drop_images=False, weight_model = None, onehot_pool = 'true', filter_model = None, filter_thresh = None):
 
         """Collection of hyperparameters used for model building and training
 
@@ -78,10 +39,6 @@ class _ModelParams:
             early_stop (bool, optional): Use early stopping. Defaults to False.
             early_stop_patience (int, optional): Patience for early stopping, in epochs. Defaults to 0.
             early_stop_method (str, optional): Metric to monitor for early stopping. Defaults to 'loss'.
-            manual_early_stop_epoch (int, optional): Manually override early stopping to occur at this epoch/batch.
-                Defaults to None.
-            manual_early_stop_batch (int, optional): Manually override early stopping to occur at this epoch/batch.
-                Defaults to None.
             training_balance ([type], optional): Type of batch-level balancing to use during training.
                 Options include 'tile', 'category', 'patient', 'slide', and None. Defaults to 'category' if a
                 categorical loss is provided, and 'patient' if a linear loss is provided.
@@ -104,9 +61,16 @@ class _ModelParams:
                 Internal default tile can be found at slideflow.slide.norm_tile.jpg
             include_top (bool, optional): Include post-convolution fully-connected layers from the core model. Defaults
                 to True. include_top=False is not currently compatible with the PyTorch backend.
-            drop_images (bool, optional): Drop images, using only other slide-level features as input.
-                Defaults to False.
+            drop_images (bool, optional): Drop images, using only other slide-level features as input. Defaults to False.
         """
+
+        # Additional hyperparameters to consider:
+        # beta1 0.9
+        # beta2 0.999
+        # epsilon 1.0
+        # batch_norm_decay 0.99
+
+        # Assert provided hyperparameters are valid
         assert isinstance(tile_px, int)
         assert isinstance(tile_um, int)
         assert isinstance(toplayer_epochs, int)
@@ -119,11 +83,9 @@ class _ModelParams:
         assert isinstance(learning_rate_decay_steps, (int))
         assert isinstance(batch_size, int)
         assert isinstance(hidden_layers, int)
-        assert isinstance(manual_early_stop_batch, int) or manual_early_stop_batch is None
-        assert isinstance(manual_early_stop_epoch, int) or manual_early_stop_epoch is None
         assert isinstance(early_stop, bool)
         assert isinstance(early_stop_patience, int)
-        assert early_stop_method in ['loss', 'accuracy', 'manual']
+        assert early_stop_method in ['loss', 'accuracy']
         assert training_balance in ['auto', 'tile', 'category', 'patient', 'slide', 'none', None]
         assert validation_balance in ['tile', 'category', 'patient', 'slide', 'none', None]
         assert isinstance(hidden_layer_width, int)
@@ -164,13 +126,15 @@ class _ModelParams:
         self.early_stop = early_stop
         self.early_stop_method = early_stop_method
         self.early_stop_patience = early_stop_patience
-        self.manual_early_stop_batch = manual_early_stop_batch
-        self.manual_early_stop_epoch = manual_early_stop_epoch
         self.hidden_layers = hidden_layers
+        self.weight_model = weight_model
+        self.onehot_pool = onehot_pool
+        self.filter_model = filter_model
+        self.filter_thresh = filter_thresh
         if training_balance == 'auto':
             self.training_balance = 'category' if self.model_type() == 'categorical' else 'patient'
         else:
-            self.training_balance = training_balance  # type: ignore
+            self.training_balance = training_balance
         self.validation_balance = validation_balance
         self.hidden_layer_width = hidden_layer_width
         self.trainable_layers = trainable_layers
@@ -189,30 +153,25 @@ class _ModelParams:
         # Perform check to ensure combination of HPs are valid
         self.validate()
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         base = "ModelParams("
         for arg in self._get_args():
             base += "\n  {} = {!r},".format(arg, getattr(self, arg))
         base += "\n)"
         return base
 
-    def __str__(self) -> str:
-        args = sorted(self._get_args(), key=lambda arg: arg.lower())
-        arg_dict = {arg: getattr(self, arg) for arg in args}
-        return json.dumps(arg_dict, indent=2)
-
     @classmethod
-    def from_dict(cls, hp_dict: Dict) -> "_ModelParams":
+    def from_dict(cls, hp_dict):
         obj = cls()
         obj.load_dict(hp_dict)
         return obj
 
     @property
-    def model(self) -> str:
+    def model(self):
         return self._model
 
     @model.setter
-    def model(self, m: Union[str, Any, Dict[str, Any]]) -> None:
+    def model(self, m):
         if isinstance(m, dict):
             assert len(m) == 1
             model_name, model = list(m.items())[0]
@@ -226,92 +185,72 @@ class _ModelParams:
             self.ModelDict.update({'custom': m})
             self._model = 'custom'
 
-    def _get_args(self) -> List[str]:
-        to_ignore = [
-            'get_opt',
-            'build_model',
-            'model_type',
-            'validate',
-            'from_dict',
-            'get_dict',
-            'get_loss',
-            'get_normalizer',
-            'load_dict',
-            'OptDict',
-            'ModelDict',
-            'LinearLossDict',
-            'AllLossDict'
-        ]
-        args = [
-            arg for arg in dir(self)
-            if arg[0] != '_' and arg not in to_ignore
-        ]
-        return args
+    def _get_args(self):
+        return [arg for arg in dir(self) if not arg[0]=='_' and arg not in ['get_opt',
+                                                                            'build_model',
+                                                                            'model_type',
+                                                                            'validate',
+                                                                            'from_dict',
+                                                                            'get_dict',
+                                                                            'get_loss',
+                                                                            'get_normalizer',
+                                                                            'load_dict',
+                                                                            'OptDict',
+                                                                            'ModelDict',
+                                                                            'LinearLossDict',
+                                                                            'AllLossDict']]
 
-    def get_dict(self) -> Dict[str, Any]:
+    def get_dict(self):
         d = {}
         for arg in self._get_args():
             d.update({arg: getattr(self, arg)})
         return d
 
-    def get_normalizer(self, **kwargs) -> Optional["StainNormalizer"]:
+    def get_normalizer(self, **kwargs):
         if not self.normalizer:
             return None
         else:
             return sf.norm.autoselect(self.normalizer, self.normalizer_source, **kwargs)
 
-    def load_dict(self, hp_dict: Dict[str, Any]) -> None:
+    def load_dict(self, hp_dict):
         for key, value in hp_dict.items():
             if not hasattr(self, key):
                 log.error(f'Unrecognized hyperparameter {key}; unable to load')
             try:
                 setattr(self, key, value)
-            except Exception:
+            except:
                 log.error(f'Error setting hyperparameter {key} to {value}; unable to hyperparameters')
 
-    def _detect_classes_from_labels(
-        self,
-        labels: Dict
-    ) -> Union[int, Dict[int, int]]:
+    def __str__(self):
+        args = sorted(self._get_args(), key=lambda arg: arg.lower())
+        arg_dict = {arg: getattr(self, arg) for arg in args}
+        return json.dumps(arg_dict, indent=2)
+
+    def _detect_classes_from_labels(self, labels):
         outcome_labels = np.array(list(labels.values()))
         if len(outcome_labels.shape) == 1:
             outcome_labels = np.expand_dims(outcome_labels, axis=1)
 
         if self.model_type() == 'categorical':
-            return {i: np.unique(outcome_labels[:, i]).shape[0] for i in range(outcome_labels.shape[1])}
+            return {i: np.unique(outcome_labels[:,i]).shape[0] for i in range(outcome_labels.shape[1])}
         else:
             try:
                 return outcome_labels.shape[1]
             except TypeError:
-                raise errors.ModelParamsError('Incorrect formatting of outcomes for linear model; expected ndarray.')
+                raise errors.ModelParamsError('Incorrect formatting of outcome labels for linear model; must be an ndarray.')
 
-    def validate(self) -> bool:
+    def validate(self):
         """Check that hyperparameter combinations are valid."""
         if (self.model_type() != 'categorical' and ((self.training_balance == 'category') or
                                                     (self.validation_balance == 'category'))):
-            raise errors.ModelParamsError(
-                f'Cannot combine category-level balancing with model type "{self.model_type()}".'
-            )
+            raise errors.ModelParamsError(f'Cannot combine category-level balancing with model type "{self.model_type()}".')
         if (self.model_type() != 'categorical' and self.early_stop_method == 'accuracy'):
-            raise errors.ModelParamsError(
-                f'Model type "{self.model_type()}" is not compatible with early stopping method "accuracy"'
-            )
+            raise errors.ModelParamsError(f'Model type "{self.model_type()}" is not compatible with early stopping method "accuracy"')
         if self.uq and not self.dropout:
-            raise errors.ModelParamsError(
-                f"Uncertainty quantification (uq=True) requires dropout > 0 (got: dropout={self.dropout})"
-            )
-        if (self.early_stop
-           and self.early_stop_method == 'manual'
-           and (self.manual_early_stop_epoch is None
-                or self.manual_early_stop_batch is None)):
-            raise errors.ModelParamsError(
-                f'HP warning: both manual_early_stop_batch (got: {self.manual_early_stop_batch}) and '
-                f'manual_early_stop_epoch (got: {self.manual_early_stop_epoch}) must be != None '
-                'to trigger manual early stopping.'
-            )
+            raise errors.ModelParamsError(f"Uncertainty quantification (uq=True) requires dropout > 0 (got: dropout={self.dropout})")
         return True
 
-    def model_type(self) -> str:
+    def model_type(self):
         """Returns either 'linear', 'categorical', or 'cph' depending on the loss type."""
         if self.loss == 'negative_log_likelihood':
             return 'cph'
@@ -320,42 +259,36 @@ class _ModelParams:
         else:
             return 'categorical'
 
-
 class HyperParameterError(Exception):
     pass
 
+class ModelError(Exception):
+    def __init__(self, message, errors=None):
+        log.error(message)
+        super().__init__(message)
 
 class no_scope():
     def __enter__(self):
         return None
-
     def __exit__(self, exc_type, exc_value, traceback):
         return False
 
+def log_summary(model, neptune_run=None):
+    # Print to terminal
+    if log.getEffectiveLevel() <= 20:
+        print()
+        model.summary()
 
-def log_manifest(
-    train_tfrecords: Optional[List[str]] = None,
-    val_tfrecords: Optional[List[str]] = None,
-    *,
-    labels: Optional[Dict[str, Any]] = None,
-    filename: Optional[str] = None
-) -> str:
-    """Saves the training manifest in CSV format and returns as a string.
+    # Log to neptune
+    if neptune_run:
+        summary_string = []
+        model.summary(print_fn=lambda x: summary_string.append(x))
+        neptune_run['summary'] = "\n".join(summary_string)
 
-    Args:
-        train_tfrecords (list(str)], optional): List of training TFRecords.
-            Defaults to None.
-        val_tfrecords (list(str)], optional): List of validation TFRecords.
-            Defaults to None.
-        labels (dict, optional): TFRecord outcome labels. Defaults to None.
-        filename (str, optional): Path to CSV file to save. Defaults to None.
-
-    Returns:
-        str: Saved manifest in str format.
-    """
+def log_manifest(train_tfrecords=None, val_tfrecords=None, labels=None, save_loc=None):
     out = ''
-    if filename:
-        save_file = open(os.path.join(filename), 'w')
+    if save_loc:
+        save_file = open(os.path.join(save_loc), 'w')
         writer = csv.writer(save_file)
         writer.writerow(['slide', 'dataset', 'outcome_label'])
     if train_tfrecords or val_tfrecords:
@@ -364,15 +297,15 @@ def log_manifest(
                 slide = tfrecord.split('/')[-1][:-10]
                 outcome_label = labels[slide] if labels else 'NA'
                 out += ' '.join([slide, 'training', str(outcome_label)])
-                if filename:
+                if save_loc:
                     writer.writerow([slide, 'training', outcome_label])
         if val_tfrecords:
             for tfrecord in val_tfrecords:
                 slide = tfrecord.split('/')[-1][:-10]
                 outcome_label = labels[slide] if labels else 'NA'
                 out += ' '.join([slide, 'validation', str(outcome_label)])
-                if filename:
+                if save_loc:
                     writer.writerow([slide, 'validation', outcome_label])
-    if filename:
+    if save_loc:
         save_file.close()
     return out
