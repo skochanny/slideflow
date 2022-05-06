@@ -17,13 +17,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import matplotlib.colors as mcol
 import numpy as np
-from tqdm import tqdm
-
 import slideflow as sf
 import slideflow.util.colors as col
 from slideflow import errors
 from slideflow.util import example_pb2
 from slideflow.util.colors import *  # noqa F403,F401 - Here for compatibility
+from tqdm import tqdm
 
 # --- Optional imports --------------------------------------------------------
 # git is not needed for pypi distribution
@@ -835,7 +834,7 @@ def tfrecord_heatmap(
     tile_um: Union[int, str],
     tile_dict: Dict[int, float],
     outdir: str,
-    interpolation: str = 'bicubic'
+    interpolation: Optional[str] = 'bicubic'
 ) -> Dict[str, Dict[str, float]]:
     """Creates a tfrecord-based WSI heatmap using a dictionary of tile values
     for heatmap display.
