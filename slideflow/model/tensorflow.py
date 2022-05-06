@@ -12,9 +12,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras import applications as kapps
-
 import slideflow as sf
 import slideflow.model.base as _base
 import slideflow.util.neptune_utils
@@ -25,9 +22,11 @@ from slideflow.util import NormFit, Path
 from slideflow.util import colors as col
 from slideflow.util import log
 
+import tensorflow as tf
+from tensorflow.keras import applications as kapps
+
 if TYPE_CHECKING:
     import pandas as pd
-
     from slideflow.norm import StainNormalizer
 
 
@@ -1725,7 +1724,7 @@ class TileTrainer(Trainer):
             ]
 
     def _interleave_kwargs(self, **kwargs):
-        args = types.SimpleNamespace(
+        args = SimpleNamespace(
             labels=self._parse_tfrecord_labels,
             normalizer=self.normalizer,
             parse_loc=True,
