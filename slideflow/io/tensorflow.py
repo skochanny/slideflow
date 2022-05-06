@@ -9,9 +9,6 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, Iterable, List,
                     Optional, Tuple, Union)
 
 import numpy as np
-import tensorflow as tf
-from tqdm import tqdm
-
 import slideflow as sf
 from slideflow import errors
 from slideflow.io import gaussian
@@ -19,11 +16,14 @@ from slideflow.io.io_utils import detect_tfrecord_format
 from slideflow.util import Labels
 from slideflow.util import colors as col
 from slideflow.util import log
+from tqdm import tqdm
+
+import tensorflow as tf
 
 if TYPE_CHECKING:
-    from tensorflow.core.example.feature_pb2 import Example, Feature
-
     from slideflow.norm import StainNormalizer
+
+    from tensorflow.core.example.feature_pb2 import Example, Feature
 
 
 FEATURE_DESCRIPTION = {
@@ -420,6 +420,15 @@ def interleave(
         )
 
         if parse_loc:
+            dataset_pos = _get_parsed_datasets(
+                sampled_dataset,
+                base_parser=base_parser,  # type: ignore
+                label_parser=label_parser,
+                include_slidenames=incl_slidenames,
+                include_loc=incl_loc,
+                parse_loc=parse_loc,
+                deterministic=deterministic
+            )
             def filter0(*args):
                 matching = tf.math.equal(args[1], 0)
                 return matching
@@ -429,10 +438,9 @@ def interleave(
                 return matching
 
             out1 = dataset.filter(filter0)
-            out2 = dataset.filter(filter1)
+            out2 = dataset_pos.filter(filter1)
             dataset = tf.data.experimental.sample_from_datasets(
                 (out1, out2),
-                weights=(0.2, 0.8)
             )
 
         # ------- Apply normalization -----------------------------------------

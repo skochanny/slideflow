@@ -1711,14 +1711,15 @@ class TileTrainer(Trainer):
     _model_type = 'categorical'
 
     def __init__(self, hp, outdir, labels, patients, **kwargs):
-        super().__init__(hp, outdir, {}, patients, **kwargs)
+        super().__init__(hp=hp, outdir=outdir, labels={}, patients=patients, **kwargs)
         self.num_classes = 2
+        log.debug(f'Building lookup table, length={len(labels)}')
         with tf.device('/cpu'):
             self.annotations_tables = [
                 tf.lookup.StaticHashTable(
                     tf.lookup.KeyValueTensorInitializer(
                         labels,
-                        tf.constant(np.array([1 for _ in range(len(labels))], dtype=np.int64))
+                        tf.constant(np.array([1 for _ in range(len(labels))], dtype=np.int32))
                     ),
                     default_value=0
                 )
