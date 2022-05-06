@@ -1,40 +1,43 @@
-import os
-import sys
 import csv
-import time
-import pickle
-import numpy as np
-import pandas as pd
 import multiprocessing as mp
-from types import SimpleNamespace
-from tqdm import tqdm
+import os
+import pickle
+import sys
+import time
 from functools import partial
 from os.path import join
+from random import sample
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import pandas as pd
+from lifelines.utils import concordance_index as c_index
+from mpl_toolkits.mplot3d import Axes3D
 from scipy import stats
 from scipy.special import softmax
-from random import sample
 from sklearn import metrics
 from sklearn.cluster import KMeans
 from sklearn.metrics import pairwise_distances_argmin_min
-from mpl_toolkits.mplot3d import Axes3D
-from lifelines.utils import concordance_index as c_index
-from typing import List, Optional, Dict, Union, Any, Tuple, TYPE_CHECKING
+from tqdm import tqdm
 
 import slideflow as sf
-from slideflow.util import log, ProgressBar, to_onehot, Path
-from slideflow.util import colors as col
 from slideflow import errors
+from slideflow.util import Path, ProgressBar, as_list
+from slideflow.util import colors as col
+from slideflow.util import log, to_onehot
 
 if TYPE_CHECKING:
-    from slideflow.model import DatasetFeatures
     import neptune.new as neptune
-    import torch
     import tensorflow as tf
+    import torch
+
+    from slideflow.model import DatasetFeatures
 
 # TODO: remove 'hidden_0' reference as this may not be present
 # if the model does not have hidden layers
 # TODO: refactor all this x /y /meta /values stuff to a pd.DataFrame
-# TODO: replace _get_average_by_group with pandas group-level averaging
+# TODO: replace _average_by_group with pandas group-level averaging
 
 
 class SlideMap:
@@ -416,7 +419,8 @@ class SlideMap:
         self,
         slide_categories: Optional[Dict] = None,
         algorithm: str = 'kd_tree',
-        method: str = 'map'
+        method: str = 'map',
+        pca_dim: int = 100
     ) -> None:
         """Calculates neighbors among tiles in this map, assigning neighboring
             statistics to tile metadata 'num_unique_neighbors' and
@@ -428,17 +432,19 @@ class SlideMap:
                 'percent_matching_categories' statistic.
             algorithm (str, optional): NearestNeighbor algorithm, either
                 'kd_tree', 'ball_tree', or 'brute'. Defaults to 'kd_tree'.
-            method (str, optional): Either 'map' or 'features'. How neighbors
-                are determined. Defaults to 'map'.
+            method (str, optional): Either 'map', 'pca', or 'features'. How
+                neighbors are determined. If 'map', calculates neighbors based
+                on UMAP coordinates. If 'features', calculates neighbors on the
+                full feature space. If 'pca', reduces features into `pca_dim`
+                space. Defaults to 'map'.
         """
+        from sklearn.decomposition import PCA
         from sklearn.neighbors import NearestNeighbors
-        if method not in ('map', 'features'):
-            raise ValueError(f'Unknown neighbor method {method}.')
         if self.df is None:
             raise errors.SlideMapError(
                 "Unable perform neighbor search; no DatasetFeatures provided"
             )
-        log.info("Initializing neighbor search...")
+        log.info(f"Initializing neighbor search (method={method})...")
         if method == 'map':
             X = np.stack((self.x, self.y), axis=-1)
         elif method == 'features':
@@ -446,6 +452,18 @@ class SlideMap:
                 self.df.activations[pm['slide']][pm['index']]
                 for pm in self.point_meta
             ])
+        elif method == 'pca':
+            log.info(f"Reducing dimensionality with PCA (dim={pca_dim})...")
+            pca = PCA(n_components=pca_dim)
+            features = np.array([
+                self.df.activations[pm['slide']][pm['index']]
+                for pm in self.point_meta
+            ])
+            pca.fit(features)
+            X = pca.transform(features)
+
+        else:
+            raise ValueError(f'Unknown neighbor method {method}.')
         nbrs = NearestNeighbors(
             n_neighbors=100,
             algorithm=algorithm,
@@ -812,12 +830,12 @@ def _generate_tile_roc(
     return auc, ap, thresh  # ROC AUC, Average Precision, Optimal Threshold
 
 
-def _get_average_by_group(
+def _average_by_group(
     pred_arr: np.ndarray,
     pred_label: str,
     unique_groups: np.ndarray,
     tile_to_group: np.ndarray,
-    y_true_group: Dict[str, Union[str, int]],
+    y_true_group: Dict[str, float],
     num_cat: int,
     label_end: str,
     uncertainty: Optional[np.ndarray] = None,
@@ -877,7 +895,11 @@ def _get_average_by_group(
                 header += [f'uncertainty{i}' for i in range(num_cat)]
             writer.writerow(header)
             for i, group in enumerate(unique_groups):
-                row = [[group], y_true_group[group], avg_by_group[i]]
+                if not isinstance(y_true_group[group], (list, np.ndarray)):
+                    yt_group = as_list(y_true_group[group])
+                else:
+                    yt_group = y_true_group[group]  # type: ignore
+                row = [[group], yt_group, avg_by_group[i]]
                 if uncertainty is not None:
                     row += [np.array(uncertainty_by_group[i])]
                 row = np.concatenate(row)
@@ -891,7 +913,7 @@ def _cph_metrics(args: SimpleNamespace) -> None:
     """
     num_cat = args.y_pred.shape[1]
     args.c_index['tile'] = concordance_index(args.y_true, args.y_pred)
-    avg_by_slide = _get_average_by_group(
+    avg_by_slide = _average_by_group(
         args.y_pred,
         pred_label="average",
         unique_groups=args.unique_slides,
@@ -908,7 +930,7 @@ def _cph_metrics(args: SimpleNamespace) -> None:
     )
     args.c_index['slide'] = concordance_index(yt_by_slide, avg_by_slide)
     if not args.patient_error:
-        avg_by_patient = _get_average_by_group(
+        avg_by_patient = _average_by_group(
             args.y_pred,
             pred_label="average",
             unique_groups=args.patients,
@@ -942,7 +964,7 @@ def _linear_metrics(args: SimpleNamespace) -> None:
         neptune_run=args.neptune_run
     )
     # Generate and save slide-level averages of each outcome
-    avg_by_slide = _get_average_by_group(
+    avg_by_slide = _average_by_group(
         args.y_pred,
         pred_label="average",
         unique_groups=args.unique_slides,
@@ -955,7 +977,7 @@ def _linear_metrics(args: SimpleNamespace) -> None:
         label="slide"
     )
     yt_by_slide = np.array(
-        [args.y_true_slide[slide] for slide in args.unique_slides]
+        [as_list(args.y_true_slide[slide]) for slide in args.unique_slides]
     )
     args.r_squared['slide'] = generate_scatter(
         yt_by_slide,
@@ -966,7 +988,7 @@ def _linear_metrics(args: SimpleNamespace) -> None:
     )
     if not args.patient_error:
         # Generate and save patient-level averages of each outcome
-        avg_by_patient = _get_average_by_group(
+        avg_by_patient = _average_by_group(
             args.y_pred,
             pred_label="average",
             unique_groups=args.patients,
@@ -980,7 +1002,7 @@ def _linear_metrics(args: SimpleNamespace) -> None:
             uncertainty=args.y_std
         )
         yt_by_patient = np.array(
-            [args.y_true_patient[patient] for patient in args.patients]
+            [as_list(args.y_true_patient[pt]) for pt in args.patients]
         )
         args.r_squared['patient'] = generate_scatter(
             yt_by_patient,
@@ -1068,8 +1090,8 @@ def _categorical_metrics(args: SimpleNamespace, outcome_name: str) -> None:
         except IndexError:
             log.warning(f"Error with category accuracy for cat # {ci}")
     # Generate slide-level percent calls
-    percent_calls_by_slide = _get_average_by_group(
-        onehot_predictions,
+    percent_calls_by_slide = _average_by_group(
+        onehot_predictions if args.cat_reduce == 'onehot' else args.y_pred,
         pred_label="percent_tiles_positive",
         unique_groups=args.unique_slides,
         tile_to_group=args.tile_to_slides,
@@ -1106,8 +1128,8 @@ def _categorical_metrics(args: SimpleNamespace, outcome_name: str) -> None:
 
     if not args.patient_error:
         # Generate patient-level percent calls
-        percent_calls_by_patient = _get_average_by_group(
-            onehot_predictions,
+        percent_calls_by_patient = _average_by_group(
+            onehot_predictions if args.cat_reduce == 'onehot' else args.y_pred,
             pred_label="percent_tiles_positive",
             unique_groups=args.patients,
             tile_to_group=args.tile_to_patients,
@@ -1162,7 +1184,7 @@ def filtered_prediction(
     else:
         prediction_mask = np.ones(logits.shape, dtype=int)
         prediction_mask[filter] = 0
-    masked_logits = np.ma.masked_array(logits, mask=prediction_mask)
+    masked_logits = np.ma.masked_array(logits, mask=prediction_mask)  # type: ignore
     return int(np.argmax(masked_logits))
 
 
@@ -1315,6 +1337,7 @@ def generate_roc(
         opt_thresh = -1
     if save_dir:
         from matplotlib import pyplot as plt
+
         # ROC
         plt.clf()
         plt.title('ROC Curve')
@@ -1438,7 +1461,7 @@ def generate_scatter(
     from matplotlib import pyplot as plt
 
     if y_true.shape != y_pred.shape:
-        m = f"Shape mismatch: y_true ({y_true.shape}) y_pred: ({y_pred.shape})"
+        m = f"Shape mismatch: y_true {y_true.shape} y_pred: {y_pred.shape}"
         raise errors.StatsError(m)
     if y_true.shape[0] < 2:
         raise errors.StatsError("Only one observation provided, need >1")
@@ -1563,8 +1586,7 @@ def pred_to_df(
         else:
             y_true = [y_true]  # type: ignore
 
-    if not isinstance(y_pred, list):
-        y_pred = [y_pred]  # type: ignore
+    y_pred = as_list(y_pred)  # type: ignore
     if uncertainty is not None and not isinstance(uncertainty, list):
         uncertainty = [uncertainty]
 
@@ -1606,6 +1628,7 @@ def metrics_from_pred(
     labels: Dict[str, Any],
     patients: Dict[str, str],
     model_type: str,
+    categorical_reduce: str = 'raw',
     y_std: Optional[np.ndarray] = None,
     outcome_names: Optional[List[str]] = None,
     label: str = '',
@@ -1631,6 +1654,12 @@ def metrics_from_pred(
 
     Keyword args:
         y_std (np.ndarray, optional): Std. deviation (uncertainty) for dataset.
+        categorical_reduce (str, optional): Reduction strategy for calculating
+            slide-level and patient-level predictions for categorical outcomes.
+            Either 'raw' or 'onehot'. If 'raw', will reduce with average of
+            each logit across tiles. If 'onehot', will convert tile predictions
+            into onehot encoding via `np.argmax`, then reduce by averaging
+            these onehot values. Defaults to 'raw'.
         outcome_names (list, optional): List of str, names for outcomes.
             Defaults to None.
         label (str, optional): Label prefix/suffix for saving.
@@ -1648,6 +1677,11 @@ def metrics_from_pred(
         neptune_run (:class:`neptune.Run`, optional): Neptune run in which to
             log results. Defaults to None.
     """
+    if categorical_reduce not in ('raw', 'onehot'):
+        raise ValueError(
+            f"Unrecognized reduction strategy {categorical_reduce}; "
+            "must be either 'raw' or 'onehot'."
+        )
     label_end = "" if label == '' else f"_{label}"
     label_start = "" if label == '' else f"{label}_"
     tile_to_patients = np.array([patients[slide] for slide in tile_to_slides])
@@ -1735,11 +1769,14 @@ def metrics_from_pred(
                 metric_args.y_pred = y_pred
                 metric_args.y_true = y_true
             log.info(f"Validation metrics for outcome {col.green(outcome)}:")
+            metric_args.cat_reduce = categorical_reduce
             _categorical_metrics(metric_args, outcome)
 
     elif model_type == 'linear':
         metric_args.y_true_slide = y_true_slide
         metric_args.y_true_patient = y_true_patient
+        if len(metric_args.y_true.shape) < 2:
+            metric_args.y_true = np.expand_dims(metric_args.y_true, axis=0)
         _linear_metrics(metric_args)
 
     elif model_type == 'cph':
@@ -1791,7 +1828,9 @@ def predict_from_torch(
         y_pred, y_std, tile_to_slides
     """
     import torch
+
     from slideflow.model.torch_utils import get_uq_predictions
+
     # Get predictions and performance metrics
     log.debug("Generating predictions from torch model")
     y_pred, tile_to_slides = [], []
@@ -1880,6 +1919,7 @@ def eval_from_torch(
     """
 
     import torch
+
     from slideflow.model.torch_utils import get_uq_predictions
     y_true, y_pred, tile_to_slides = [], [], []
     y_std = [] if pred_args.uq else None  # type: ignore
@@ -2001,6 +2041,7 @@ def predict_from_tensorflow(
         y_true, y_pred, tile_to_slides, accuracy, loss
     """
     import tensorflow as tf
+
     from slideflow.model.tensorflow_utils import get_uq_predictions
 
     @tf.function
@@ -2077,6 +2118,7 @@ def eval_from_tensorflow(
     """
 
     import tensorflow as tf
+
     from slideflow.model.tensorflow_utils import get_uq_predictions
 
     @tf.function
@@ -2263,6 +2305,7 @@ def predict_from_layer(
     if sf.backend() != 'tensorflow':
         raise ValueError("Prediction from layer only supported for tensorflow.")
     import tensorflow as tf
+
     from slideflow.model.tensorflow_utils import get_layer_index_by_name
 
     first_hidden_layer_index = get_layer_index_by_name(model, input_layer_name)
@@ -2294,13 +2337,8 @@ def metrics_from_dataset(
     patients: Dict[str, str],
     dataset: Union["tf.data.Dataset", "torch.utils.data.DataLoader"],
     pred_args: SimpleNamespace,
-    outcome_names: Optional[List[str]] = None,
-    label: str = '',
-    data_dir: str = '',
     num_tiles: int = 0,
-    histogram: bool = False,
-    save_predictions: bool = True,
-    neptune_run: Optional["neptune.Run"] = None,
+    **kwargs
 ) -> Tuple[Dict, float, float]:
 
     """Evaluate performance of a given model on a given TFRecord dataset,
@@ -2312,22 +2350,32 @@ def metrics_from_dataset(
         labels (dict): Dictionary mapping slidenames to outcomes.
         patients (dict): Dictionary mapping slidenames to patients.
         dataset (tf.data.Dataset or torch.utils.data.DataLoader): Dataset.
-        outcome_names (list, optional): List of str, names for outcomes.
-            Defaults to None.
-        label (str, optional): Label prefix/suffix for saving.
-            Defaults to None.
-        data_dir (str, optional): Path to data directory for saving.
-            Defaults to None.
         num_tiles (int, optional): Number of total tiles expected in dataset.
             Used for progress bar. Defaults to 0.
+        neptune_run (:class:`neptune.Run`, optional): Neptune run in which to
+            log results. Defaults to None.
+        pred_args (namespace, optional): Additional arguments to tensorflow and
+            torch backends.
+
+    Keyword args:
+        categorical_reduce (str, optional): Reduction strategy for calculating
+            slide-level and patient-level predictions for categorical outcomes.
+            Either 'raw' or 'onehot'. If 'raw', will reduce with average of
+            each logit across tiles. If 'onehot', will convert tile predictions
+            into onehot encoding via `np.argmax`, then reduce by averaging
+            these onehot values. Defaults to 'raw'.
+        label (str, optional): Label prefix/suffix for saving.
+            Defaults to None.
+        outcome_names (list, optional): List of str, names for outcomes.
+            Defaults to None.
+        data_dir (str): Path to data directory for saving.
+            Defaults to empty string (current directory).
         histogram (bool, optional): Write histograms to data_dir.
             Defaults to False.
         save_predictions (bool, optional): Save tile, slide, and patient-level
             predictions to CSV. Defaults to True.
         neptune_run (:class:`neptune.Run`, optional): Neptune run in which to
             log results. Defaults to None.
-        pred_args (namespace, optional): Additional arguments to tensorflow and
-            torch backends.
 
     Returns:
         metrics [dict], accuracy [float], loss [float]
@@ -2349,13 +2397,8 @@ def metrics_from_dataset(
         labels=labels,
         patients=patients,
         model_type=model_type,
-        outcome_names=outcome_names,
-        label=label,
-        data_dir=data_dir,
-        save_predictions=save_predictions,
-        histogram=histogram,
         plot=True,
-        neptune_run=neptune_run
+        **kwargs
     )
     after_metrics = time.time()
     log.debug(f'Metrics generated ({after_metrics - before_metrics:.2f} s)')

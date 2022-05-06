@@ -1,23 +1,23 @@
-import os
-import numpy as np
-import random
-import torchvision
-import torch
-import threading
 import multiprocessing as mp
+import os
+import random
+import threading
 from os import listdir
-from tqdm import tqdm
-from os.path import isfile, join, dirname, exists
+from os.path import dirname, exists, isfile, join
 from queue import Queue
-from typing import (
-    List, Dict, Union, Any, Tuple, Optional, Callable, Iterable, TYPE_CHECKING
-)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Iterable, List,
+                    Optional, Tuple, Union)
+
+import numpy as np
+import torch
+import torchvision
+from tqdm import tqdm
 
 import slideflow as sf
-from slideflow.tfrecord.torch.dataset import MultiTFRecordDataset
-from slideflow.util import log, to_onehot, Labels
-from slideflow.io.io_utils import detect_tfrecord_format
 from slideflow import errors
+from slideflow.io.io_utils import detect_tfrecord_format
+from slideflow.tfrecord.torch.dataset import MultiTFRecordDataset
+from slideflow.util import Labels, log, to_onehot
 
 if TYPE_CHECKING:
     from slideflow.norm import StainNormalizer
@@ -161,7 +161,7 @@ class InterleaveIterator(torch.utils.data.IterableDataset):
             self.label_prob = _lbls / len(_all_labels)
         else:
             self.unique_labels = None
-            self.label_prob = None
+            self.label_prob = None  # type: ignore
             self.num_outcomes = 1
         self.labels = labels
 
@@ -286,7 +286,8 @@ class InterleaveIterator(torch.utils.data.IterableDataset):
         if self.use_labels and self.model_type == 'categorical':
             return random.choices(
                 self.unique_labels,
-                weights=self.label_prob, k=1
+                weights=self.label_prob, # type: ignore
+                k=1
             )[0]
         elif self.use_labels:
             return [np.random.rand()]
@@ -411,7 +412,7 @@ def _decode_image(
 
 
 def worker_init_fn(worker_id) -> None:
-    np.random.seed(np.random.get_state()[1][0])
+    np.random.seed(np.random.get_state()[1][0])  # type: ignore
 
 
 def get_tfrecord_parser(

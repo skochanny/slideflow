@@ -1,36 +1,122 @@
+'''Module for the `sf.Dataset` class and its associated functions.
+
+The Dataset class handles management of collections of patients,
+clinical annotations, slides, extracted tiles, and assembly of images
+into torch DataLoader and tensorflow Dataset objects. The high-level
+overview of the structure of the Dataset class is as follows:
+
+
+ ──────────── Information Methods ───────────────────────────────
+   Annotations      Slides        Settings         TFRecords
+  ┌──────────────┐ ┌─────────┐   ┌──────────────┐ ┌──────────────┐
+  │Patient       │ │Paths to │   │Tile size (px)│ | *.tfrecords  |
+  │Slide         │ │ slides  │   │Tile size (um)│ |  (generated) |
+  │Label(s)      │ └─────────┘   └──────────────┘ └──────────────┘
+  │ - Categorical│  .slides()     .tile_px         .tfrecords()
+  │ - Continuous │  .rois()       .tile_um         .manifest()
+  │ - Time Series│  .slide_paths()                 .num_tiles
+  └──────────────┘  .thumbnails()                  .img_format
+    .patients()
+    .rois()
+    .labels()
+    .harmonize_labels()
+    .is_float()
+
+
+ ─────── Filtering and Splitting Methods ──────────────────────
+  ┌────────────────────────────┐
+  │                            │
+  │ ┌─────────┐                │ .filter()
+  │ │Filtered │                │ .remove_filter()
+  │ │ Dataset │                │ .clear_filters()
+  │ └─────────┘                │ .train_val_split()
+  │               Full Dataset │
+  └────────────────────────────┘
+
+
+ ───────── Summary of Image Data Flow ──────────────────────────
+  ┌──────┐
+  │Slides├─────────────┐
+  └──┬───┘             │
+     │                 │
+     ▼                 │
+  ┌─────────┐          │
+  │TFRecords├──────────┤
+  └──┬──────┘          │
+     │                 │
+     ▼                 ▼
+  ┌────────────────┐ ┌─────────────┐
+  │torch DataLoader│ │Loose images │
+  │ / tf Dataset   │ │ (.png, .jpg)│
+  └────────────────┘ └─────────────┘
+
+ ──────── Slide Processing Methods ─────────────────────────────
+  ┌──────┐
+  │Slides├───────────────┐
+  └──┬───┘               │
+     │.extract_tiles()   │.extract_tiles(
+     ▼                   │    save_tiles=True
+  ┌─────────┐            │  )
+  │TFRecords├────────────┤
+  └─────────┘            │ .extract_tiles
+                         │  _from_tfrecords()
+                         ▼
+                       ┌─────────────┐
+                       │Loose images │
+                       │ (.png, .jpg)│
+                       └─────────────┘
+
+
+ ─────────────── TFRecords Operations ─────────────────────────
+                      ┌─────────┐
+   ┌────────────┬─────┤TFRecords├──────────┐
+   │            │     └─────┬───┘          │
+   │.tfrecord   │.tfrecord  │ .balance()   │.resize_tfrecords()
+   │  _heatmap()│  _report()│ .clip()      │.split_tfrecords
+   │            │           │ .torch()     │  _by_roi()
+   │            │           │ .tensorflow()│
+   ▼            ▼           ▼              ▼
+  ┌───────┐ ┌───────┐ ┌────────────────┐┌─────────┐
+  │Heatmap│ │PDF    │ │torch DataLoader││TFRecords│
+  └───────┘ │ Report│ │ / tf Dataset   │└─────────┘
+            └───────┘ └────────────────┘
+'''
+
 import copy
+import csv
+import multiprocessing
+import os
+import shutil
 import threading
 import time
-import os
-import csv
-import shutil
 import types
-import multiprocessing
-import shapely.geometry as sg
-import numpy as np
-import pandas as pd
+from collections import defaultdict
+from datetime import datetime
+from glob import glob
+from multiprocessing.dummy import Pool as DPool
+from os.path import basename, dirname, exists, isdir, join
 from queue import Queue
 from random import shuffle
-from glob import glob
-from datetime import datetime
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple,
+                    Union)
+
+import numpy as np
+import pandas as pd
+import shapely.geometry as sg
 from tqdm import tqdm
-from os.path import isdir, join, exists, dirname, basename
-from multiprocessing.dummy import Pool as DPool
-from collections import defaultdict
-from typing import (Optional, List, Dict, Union, Any, Tuple,
-                    Sequence, TYPE_CHECKING)
 
 import slideflow as sf
 from slideflow import errors
-from slideflow.slide import WSI, ExtractionReport, SlideReport
 from slideflow.model import ModelParams
-from slideflow.util import log, Path, _shortname, path_to_name, Labels
-from slideflow.util import tfrecord2idx
+from slideflow.slide import WSI, ExtractionReport, SlideReport
+from slideflow.util import Labels, Path, _shortname
 from slideflow.util import colors as col
+from slideflow.util import log, path_to_name, tfrecord2idx
 
 if TYPE_CHECKING:
     import tensorflow as tf
     from torch.utils.data import DataLoader
+
     from slideflow.norm import StainNormalizer
 
 
@@ -58,6 +144,9 @@ def _tile_extractor(
         generator_kwargs (dict): Keyword arguments for WSI.extract_tiles()
         qc_kwargs(dict): Keyword arguments for quality control.
     """
+    # Flush console tqdm log handler; improves console readability
+    # when using a progress bar
+    log.handlers[0].flush_line = True  # type: ignore
     try:
         log.debug(f'Extracting tiles for {path_to_name(path)}')
         if tma:
@@ -311,7 +400,7 @@ class Dataset:
         config: Path,
         sources: Union[str, List[str]],
         tile_px: Optional[int],
-        tile_um: Optional[int],
+        tile_um: Optional[Union[str, int]],
         filters: Optional[Dict] = None,
         filter_blank: Optional[Union[List[str], str]] = None,
         annotations: Optional[Union[Path, pd.DataFrame]] = None,
@@ -324,7 +413,8 @@ class Dataset:
             sources (List[str]): List of dataset sources to include from
                 configuration file.
             tile_px (int): Tile size in pixels.
-            tile_um (int): Tile size in microns.
+            tile_um (int or str): Tile size in microns (int) or magnification
+                (str, e.g. "20x").
             filters (Optional[Dict], optional): Filters for selecting slides
                 from annotations. Defaults to None.
             filter_blank (Optional[Union[List[str], str]], optional): Omit
@@ -340,13 +430,17 @@ class Dataset:
             errors.SourceNotFoundError: If provided source does not exist
             in the dataset config.
         """
+        if isinstance(tile_um, str):
+            sf.util.assert_is_mag(tile_um)
+            tile_um = tile_um.lower()
 
         self.tile_px = tile_px
         self.tile_um = tile_um
         self._filters = filters if filters else {}
-        self._filter_blank = filter_blank if filter_blank is not None else []
-        if not isinstance(self._filter_blank, list):
-            self._filter_blank = [self._filter_blank]
+        if filter_blank is None:
+            self._filter_blank = []
+        else:
+            self._filter_blank = sf.util.as_list(filter_blank)
         self._min_tiles = min_tiles
         self._clip = {}  # type: Dict[str, int]
         self.prob_weights = None  # type: Optional[Dict]
@@ -364,7 +458,10 @@ class Dataset:
             sources_list = ', '.join(sources)
             raise errors.SourceNotFoundError(sources_list, config)
         if (tile_px is not None) and (tile_um is not None):
-            label = f"{tile_px}px_{tile_um}um"
+            if isinstance(tile_um, str):
+                label = f"{tile_px}px_{tile_um.lower()}"
+            else:
+                label = f"{tile_px}px_{tile_um}um"
         else:
             label = None
         for source in self.sources:
@@ -440,8 +537,8 @@ class Dataset:
         else:
             raise ValueError(f"Unrecognized hyperparameter type {type(hp)}")
         if self.tile_px != hp_px or self.tile_um != hp_um:
-            d_sz = f'({self.tile_px}px, {self.tile_um}um)'
-            m_sz = f'({hp_px}px, {hp_um}um)'
+            d_sz = f'({self.tile_px}px, tile_um={self.tile_um})'
+            m_sz = f'({hp_px}px, tile_um={hp_um})'
             raise ValueError(
                 f"Dataset tile size {d_sz} does not match model {m_sz}"
             )
@@ -587,8 +684,7 @@ class Dataset:
             if headers is None:
                 raise ValueError('Category balancing requires headers.')
             # Ensure that header is not type 'float'
-            if not isinstance(headers, list):
-                headers = [headers]
+            headers = sf.util.as_list(headers)
             if any(ret.is_float(h) for h in headers) and not force:
                 raise errors.DatasetBalanceError(
                     f"Headers {','.join(headers)} appear to be `float`."
@@ -602,11 +698,7 @@ class Dataset:
             tfr_cats = {}  # type: Dict[str, str]
             for tfrecord in tfrecords:
                 slide = path_to_name(tfrecord)
-                raw_balance_cat = labels[slide]
-                if not isinstance(raw_balance_cat, list):
-                    balance_cat = [raw_balance_cat]
-                else:
-                    balance_cat = raw_balance_cat  # type: ignore
+                balance_cat = sf.util.as_list(labels[slide])
                 balance_cat_str = '-'.join(map(str, balance_cat))
                 tfr_cats[tfrecord] = balance_cat_str
                 tiles = totals[tfrecord]
@@ -754,11 +846,7 @@ class Dataset:
             tfr_cats = {}
             for tfrecord in tfrecords:
                 slide = path_to_name(tfrecord)
-                raw_balance_category = labels[slide]
-                if not isinstance(raw_balance_category, list):
-                    balance_category = [raw_balance_category]
-                else:
-                    balance_category = raw_balance_category  # type: ignore
+                balance_category = sf.util.as_list(labels[slide])
                 balance_cat_str = '-'.join(map(str, balance_category))
                 tfr_cats[tfrecord] = balance_cat_str
                 tiles = totals[tfrecord]
@@ -900,7 +988,7 @@ class Dataset:
                 "Dataset tile_px and tile_um must be != 0 to extract tiles"
             )
         if source:
-            sources = [source] if not isinstance(source, list) else source
+            sources = sf.util.as_list(source)
         else:
             sources = list(self.sources.keys())
         pdf_report = None
@@ -958,8 +1046,8 @@ class Dataset:
                 ]
                 if len(done):
                     log.info(f'Skipping {len(done)} slides; already done.')
-            _tail = f"({self.tile_um} um, {self.tile_px} px)"
-            log.info(f'Extracting tiles from {len(slide_list)} slides{_tail}')
+            _tail = f"(tile_px={self.tile_px}, tile_um={self.tile_um})"
+            log.info(f'Extracting tiles from {len(slide_list)} slides {_tail}')
 
             # Verify slides and estimate total number of tiles
             log.info('Verifying slides...')
@@ -1002,6 +1090,19 @@ class Dataset:
                 counter = manager.Value('i', 0)
                 counter_lock = manager.Lock()
 
+                # If only one worker, use a single shared multiprocessing pool
+                if num_workers == 1:
+                    # Detect CPU cores if num_threads not specified
+                    if 'num_threads' not in kwargs:
+                        num_threads = os.cpu_count()
+                        if num_threads is None:
+                            num_threads = 8
+                    else:
+                        num_threads = kwargs['num_threads']
+                    log.info(f'Extracting tiles with {num_threads} threads')
+                    kwargs['pool'] = multiprocessing.Pool(num_threads)
+
+                # Set up the multiprocessing progress bar
                 if total_tiles:
                     pb = sf.util.ProgressBar(
                         total_tiles,
@@ -1016,17 +1117,6 @@ class Dataset:
                 else:
                     pb = None
 
-                # If only one worker, use a single shared multiprocessing pool
-                if num_workers == 1:
-                    # Detect CPU cores if num_threads not specified
-                    if 'num_threads' not in kwargs:
-                        num_threads = os.cpu_count()
-                        if num_threads is None:
-                            num_threads = 8
-                    else:
-                        num_threads = kwargs['num_threads']
-                    log.info(f'Extracting tiles with {num_threads} threads')
-                    kwargs['pool'] = multiprocessing.Pool(num_threads)
                 wsi_kwargs = {
                     'tile_px': self.tile_px,
                     'tile_um': self.tile_um,
@@ -1266,7 +1356,7 @@ class Dataset:
                 list of str; indices correspond with the outcome label id.
         """
         results = {}  # type: Dict
-        headers = [headers] if not isinstance(headers, list) else headers
+        headers = sf.util.as_list(headers)
         unique_labels = {}
         filtered_pts = self.filtered_annotations.patient
         filtered_slides = self.filtered_annotations.slide
@@ -1354,8 +1444,7 @@ class Dataset:
                 if not header_is_float:
                     lbl = _process_cat_label(lbl)
                 if slide in results:
-                    if not isinstance(results[slide], list):
-                        results[slide] = [results[slide]]
+                    results[slide] = sf.util.as_list(results[slide])
                     results[slide] += [lbl]
                 elif header_is_float:
                     results[slide] = [lbl]
@@ -1498,8 +1587,7 @@ class Dataset:
                 else:
                     del ret._filters[f]
         if 'filter_blank' in kwargs:
-            if not isinstance(kwargs['filter_blank'], list):
-                kwargs['filter_blank'] = [kwargs['filter_blank']]
+            kwargs['filter_blank'] = sf.util.as_list(kwargs['filter_blank'])
             for f in kwargs['filter_blank']:
                 if f not in ret._filter_blank:
                     raise errors.DatasetFilterError(
@@ -1611,9 +1699,7 @@ class Dataset:
                             f"Filter header {filter_key} not in annotations."
                         )
                     ann_val = ann[filter_key]
-                    filter_vals = self.filters[filter_key]
-                    if not isinstance(filter_vals, list):
-                        filter_vals = [filter_vals]
+                    filter_vals = sf.util.as_list(self.filters[filter_key])
 
                     # Allow filtering based on shortnames if the key
                     # is a patient ID
@@ -1876,11 +1962,7 @@ class Dataset:
             raise errors.DatasetError(
                 "Dataset tile_px & tile_um must be set to create TFRecords."
             )
-        if not isinstance(tfrecord, list):
-            tfrecord_list = [tfrecord]
-        else:
-            tfrecord_list = tfrecord
-        for tfr in tfrecord_list:
+        for tfr in sf.util.as_list(tfrecord):
             name = sf.util.path_to_name(tfr)
             if name not in slide_paths:
                 raise errors.SlideNotFoundError(f'Unable to find slide {name}')
@@ -2665,7 +2747,8 @@ class Dataset:
             )
             for tfr in pb:
                 fmt = sf.io.detect_tfrecord_format(tfr)[-1]
-                img_formats += [fmt]
+                if fmt is not None:
+                    img_formats += [fmt]
             if len(set(img_formats)) > 1:
                 log_msg = "Mismatched TFRecord image formats:\n"
                 for tfr, fmt in zip(tfrecords, img_formats):
@@ -2674,6 +2757,9 @@ class Dataset:
                 raise errors.MismatchedImageFormatsError(
                     "Mismatched TFRecord image formats detected"
                 )
-            return img_formats[0]
+            if len(img_formats):
+                return img_formats[0]
+            else:
+                return None
         else:
             return None

@@ -4,39 +4,38 @@ Supports both PyTorch and Tensorflow backends, importing either model.tensorflow
 or model.pytorch based on the environmental variable SF_BACKEND.
 '''
 
-import sys
-import os
 import csv
+import os
 import pickle
-import time
 import queue
+import sys
 import threading
+import time
 import warnings
+from collections import defaultdict
+from math import isnan
+from os.path import exists, join
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import scipy.stats as stats
-from collections import defaultdict
-from os.path import join, exists
-from math import isnan
-from tqdm import tqdm
-from typing import List, Dict, Union, Any, Optional, Tuple
-
 import slideflow as sf
-from slideflow.util import log, Path, Labels
-from slideflow.util import colors as col
 from slideflow import errors
+from slideflow.util import Labels, Path
+from slideflow.util import colors as col
+from slideflow.util import log
+from tqdm import tqdm
 
 # --- Backend-specific imports ------------------------------------------------
 
 if os.environ['SF_BACKEND'] == 'tensorflow':
-    from slideflow.model.tensorflow import (  # noqa F401
-        ModelParams, Trainer, LinearTrainer, CPHTrainer, Features,
-        UncertaintyInterface
-    )
+    from slideflow.model.tensorflow import (CPHTrainer, Features,  # noqa F401
+                                            LinearTrainer, ModelParams,
+                                            Trainer, UncertaintyInterface)
 elif os.environ['SF_BACKEND'] == 'torch':
-    from slideflow.model.torch import (  # type: ignore  # noqa F401
-        ModelParams, Trainer, LinearTrainer, CPHTrainer, Features,
-        UncertaintyInterface
-    )
+    from slideflow.model.torch import CPHTrainer  # type: ignore  # noqa F401
+    from slideflow.model.torch import (Features, LinearTrainer, ModelParams,
+                                       Trainer, UncertaintyInterface)
 else:
     raise errors.BackendError(f"Unknown backend {os.environ['SF_BACKEND']}")
 
@@ -305,10 +304,9 @@ class DatasetFeatures:
 
         # Rename tfrecord_array to tfrecords
         log.info(f'Calculating activations for {self.tfrecords.shape[0]} '
-                 'tfrecords (layers={layers})')
+                 f'tfrecords (layers={layers})')
         log.info(f'Generating from {col.green(model)}')
-        if not isinstance(layers, list):
-            layers = [layers]
+        layers = sf.util.as_list(layers)
 
         # Load model
         if self.hp.uq and include_uncertainty:
@@ -362,8 +360,7 @@ class DatasetFeatures:
                 model_out, batch_slides, batch_loc = q.get()
                 if model_out is None:
                     return
-                if not isinstance(model_out, list):
-                    model_out = [model_out]
+                model_out = sf.util.as_list(model_out)
 
                 if sf.backend() == 'tensorflow':
                     decoded_slides = [
@@ -482,8 +479,8 @@ class DatasetFeatures:
                 generate box plots.
             outdir (str): Path to directory in which to save box plots.
         """
-        import seaborn as sns
         import matplotlib.pyplot as plt
+        import seaborn as sns
 
         if not isinstance(features, list):
             raise ValueError("'features' must be a list of int.")

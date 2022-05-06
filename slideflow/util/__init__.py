@@ -1,28 +1,29 @@
-import re
-import sys
-import json
 import csv
-import time
-import os
-import shutil
-import threading
-import logging
 import importlib.util
+import json
+import logging
 import multiprocessing as mp
-import numpy as np
-import matplotlib.colors as mcol
-from glob import glob
-from os.path import join, isdir, exists, dirname
-from tqdm import tqdm
-from statistics import mean, median
+import os
+import re
+import shutil
+import sys
+import threading
+import time
 from functools import partial
-from typing import Union, Optional, Any, List, Dict, Tuple, Callable
+from glob import glob
+from os.path import dirname, exists, isdir, join
+from statistics import mean, median
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import matplotlib.colors as mcol
+import numpy as np
+from tqdm import tqdm
 
 import slideflow as sf
 import slideflow.util.colors as col
+from slideflow import errors
 from slideflow.util import example_pb2
 from slideflow.util.colors import *  # noqa F403,F401 - Here for compatibility
-from slideflow import errors
 
 # --- Optional imports --------------------------------------------------------
 # git is not needed for pypi distribution
@@ -417,6 +418,40 @@ class ThreadSafeList:
         return items
 
 
+def as_list(arg1: Any) -> List[Any]:
+    if not isinstance(arg1, list):
+        return [arg1]
+    else:
+        return arg1
+
+
+def is_mag(arg1: str) -> bool:
+    arg1_split = arg1.lower().split('x')
+    if (len(arg1_split) != 2) or (arg1_split[1] != ''):
+        return False
+    try:
+        mag = float(arg1_split[0])
+    except ValueError:
+        return False
+    return True
+
+
+def assert_is_mag(arg1: str):
+    if not isinstance(arg1, str) or not is_mag(arg1):
+        raise ValueError(
+            f'Invalid magnification {arg1}. Must be of format'
+            f' [int/float]x, such as "10x", "20X", or "2.5x"'
+        )
+
+
+def to_mag(arg1: str) -> Union[int, float]:
+    assert_is_mag(arg1)
+    try:
+        return int(arg1.lower().split('x')[0])
+    except ValueError:
+        return float(arg1.lower().split('x')[0])
+
+
 def multi_warn(arr: List, compare: Callable, msg: Union[Callable, str]) -> int:
     """Logs multiple warning
 
@@ -797,7 +832,7 @@ def tfrecord_heatmap(
     tfrecord: str,
     slide: str,
     tile_px: int,
-    tile_um: int,
+    tile_um: Union[int, str],
     tile_dict: Dict[int, float],
     outdir: str,
     interpolation: str = 'bicubic'
@@ -811,7 +846,8 @@ def tfrecord_heatmap(
         tile_dict (dict): Dictionary mapping tfrecord indices to a
             tile-level value for display in heatmap format.
         tile_px (int): Tile width in pixels.
-        tile_um (int): Tile width in microns.
+        tile_um (int or str): Tile width in microns (int) or magnification
+            (str, e.g. "20x").
         outdir (str): Path to directory in which to save images.
 
     Returns:

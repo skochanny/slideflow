@@ -1,14 +1,15 @@
 '''Submodule that includes base classes to be extended by framework-specific implementations.'''
 
+import csv
 import json
 import os
-import csv
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+
 import numpy as np
-from typing import Union, List, Optional, Dict, Any, TYPE_CHECKING
 
 import slideflow as sf
-from slideflow.util import log
 from slideflow import errors
+from slideflow.util import log
 
 if TYPE_CHECKING:
     from slideflow.norm import StainNormalizer
@@ -24,7 +25,7 @@ class _ModelParams:
         self,
         *,
         tile_px: int = 299,
-        tile_um: int = 302,
+        tile_um: Union[int, str] = 302,
         epochs: Union[int, List[int]] = 3,
         toplayer_epochs: int = 0,
         model: str = 'xception',
@@ -62,7 +63,8 @@ class _ModelParams:
 
         Args:
             tile_px (int, optional): Tile width in pixels. Defaults to 299.
-            tile_um (int, optional): Tile width in microns. Defaults to 302.
+            tile_um (int or str, optional): Tile width in microns (int) or
+                magnification (str, e.g. "20x"). Defaults to 302.
             epochs (int, optional): Number of epochs to train the full model. Defaults to 3.
             toplayer_epochs (int, optional): Number of epochs to only train the fully-connected layers. Defaults to 0.
             model (str, optional): Base model architecture name. Defaults to 'xception'.
@@ -108,7 +110,7 @@ class _ModelParams:
                 Defaults to False.
         """
         assert isinstance(tile_px, int)
-        assert isinstance(tile_um, int)
+        assert isinstance(tile_um, (str, int))
         assert isinstance(toplayer_epochs, int)
         assert isinstance(epochs, (int, list))
         if isinstance(epochs, list):
@@ -148,6 +150,10 @@ class _ModelParams:
         if l2_dense is not None:
             assert isinstance(l2_dense, (int, float))
             assert 0 <= l2_dense <= 1
+
+        if isinstance(tile_um, str):
+            sf.util.assert_is_mag(tile_um)
+            tile_um = tile_um.lower()
 
         self.tile_px = tile_px
         self.tile_um = tile_um

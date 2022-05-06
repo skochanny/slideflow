@@ -1,28 +1,31 @@
-import os
+import copy
+import csv
+import itertools
 import json
 import logging
-import itertools
-import csv
-import copy
-import pickle
-import numpy as np
 import multiprocessing
-from os.path import join, exists, basename
-from tqdm import tqdm
+import os
+import pickle
+from os.path import basename, exists, join
 from types import SimpleNamespace
-from typing import Any, List, Union, Optional, Dict, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+from tqdm import tqdm
 
 import slideflow as sf
-from slideflow import project_utils, errors
+from slideflow import errors, project_utils
 from slideflow.dataset import Dataset
 from slideflow.model import ModelParams
-from slideflow.util import log, path_to_name, Path
+from slideflow.project_utils import auto_dataset, get_validation_settings
+from slideflow.util import Path
 from slideflow.util import colors as col
-from slideflow.project_utils import get_validation_settings, auto_dataset
+from slideflow.util import log, path_to_name
 
 if TYPE_CHECKING:
-    from slideflow.model import Trainer, DatasetFeatures
     import pandas as pd
+
+    from slideflow.model import DatasetFeatures, Trainer
 
 
 class Project:
@@ -370,8 +373,7 @@ class Project:
             outcomes = config['outcomes']
 
         assert outcomes is not None
-        if not isinstance(outcomes, list):
-            outcomes = [outcomes]
+        outcomes = sf.util.as_list(outcomes)
 
         # Filter out slides that are blank in the outcome label,
         # or blank in any of the input_header categories
@@ -947,7 +949,8 @@ class Project:
     def evaluate(
         self,
         model: Path,
-        outcomes: Union[str, List[str]], *,
+        outcomes: Union[str, List[str]],
+        *,
         dataset: Dataset,
         filters: Optional[Dict] = None,
         filter_blank: Optional[Union[str, List[str]]] = None,
@@ -1026,7 +1029,9 @@ class Project:
         pt_files: Path,
         outcomes: Union[str, List[str]],
         tile_px: int,
-        tile_um: int, *, k: int = 0,
+        tile_um: Union[int, str],
+        *,
+        k: int = 0,
         eval_tag: Optional[str] = None,
         filters: Optional[Dict] = None,
         filter_blank: Optional[Union[str, List[str]]] = None,
@@ -1039,7 +1044,8 @@ class Project:
             pt_files (str): Path to pt_files containing tile-level features.
             outcomes (str or list): Annotation column that specifies labels.
             tile_px (int): Tile width in pixels.
-            tile_um (int): Tile width in microns.
+            tile_um (int or str): Tile width in microns (int) or magnification
+                (str, e.g. "20x").
             k (int, optional): K-fold / split iteration to evaluate. Evaluates
                 the model saved as s_{k}_checkpoint.pt. Defaults to 0.
             eval_tag (str, optional): Unique identifier for this evaluation.
@@ -1056,8 +1062,8 @@ class Project:
         """
 
         import slideflow.clam as clam
-        from slideflow.clam.datasets.dataset_generic import Generic_MIL_Dataset
         from slideflow.clam.create_attention import export_attention
+        from slideflow.clam.datasets.dataset_generic import Generic_MIL_Dataset
 
         # Detect source CLAM experiment which we are evaluating.
         # First, assume it lives in this project's clam folder
@@ -1172,7 +1178,8 @@ class Project:
     def extract_tiles(
         self,
         tile_px: int,
-        tile_um: int, *,
+        tile_um: Union[int, str],
+        *,
         filters: Optional[Dict] = None,
         filter_blank: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
@@ -1182,6 +1189,9 @@ class Project:
         :class:`slideflow.dataset.Dataset` directly.
 
         Args:
+            tile_px (int): Size of tiles to extract, in pixels.
+            tile_um (int or str): Size of tiles to extract, in microns (int) or
+                magnification (str, e.g. "20x").
             save_tiles (bool, optional): Save tile images in loose format.
                 Defaults to False.
             save_tfrecords (bool, optional): Save tile images as TFRecords.
@@ -1271,7 +1281,8 @@ class Project:
 
     @auto_dataset
     def generate_features(
-        self, model: Path,
+        self,
+        model: Path,
         *,
         dataset: Dataset,
         filters: Optional[Dict] = None,
@@ -1539,8 +1550,9 @@ class Project:
 
     def generate_mosaic(
         self,
-        df: "DatasetFeatures", *,
+        df: "DatasetFeatures",
         dataset: Optional[Dataset] = None,
+        *,
         filters: Optional[Dict] = None,
         filter_blank: Optional[Union[str, List[str]]] = None,
         outcomes: Optional[Union[str, List[str]]] = None,
@@ -1924,7 +1936,7 @@ class Project:
         self,
         tfrecord: str,
         tile_px: int,
-        tile_um: int,
+        tile_um: Union[int, str],
         tile_dict: Dict[int, float],
         outdir: Optional[str] = None
     ) -> None:
@@ -1936,7 +1948,8 @@ class Project:
             tile_dict (dict): Dictionary mapping tfrecord indices to a
                 tile-level value for display in heatmap format
             tile_px (int): Tile width in pixels
-            tile_um (int): Tile width in microns
+            tile_um (int or str): Tile width in microns (int) or magnification
+                (str, e.g. "20x").
             outdir (str, optional): Destination path to save heatmap.
 
         Returns:
@@ -1954,7 +1967,7 @@ class Project:
     def dataset(
         self,
         tile_px: Optional[int] = None,
-        tile_um: Optional[int] = None,
+        tile_um: Optional[Union[int, str]] = None,
         *,
         verification: Optional[str] = 'both',
         **kwargs: Any
@@ -1963,7 +1976,8 @@ class Project:
 
         Args:
             tile_px (int): Tile size in pixels
-            tile_um (int): Tile size in microns
+            tile_um (int or str): Tile size in microns (int) or magnification
+                (str, e.g. "20x").
 
         Keyword Args:
             filters (dict, optional): Filters for selecting tfrecords.
@@ -2164,7 +2178,7 @@ class Project:
             os.makedirs(outdir)
 
         if source:
-            sources = [source] if not isinstance(source, list) else source
+            sources = sf.util.as_list(source)
         else:
             sources = self.sources
         if dataset.tile_px is None or dataset.tile_um is None:
@@ -2464,7 +2478,7 @@ class Project:
                     log.info(f'{col.green(model)} validation metrics:')
                     for m in final_val_metrics:
                         log.info(f'{m}: {final_val_metrics[m]}')
-        return results_dict
+        return dict(results_dict)
 
     def train_clam(
         self,
@@ -2522,8 +2536,8 @@ class Project:
         """
 
         import slideflow.clam as clam
-        from slideflow.clam.datasets.dataset_generic import Generic_MIL_Dataset
         from slideflow.clam.create_attention import export_attention
+        from slideflow.clam.datasets.dataset_generic import Generic_MIL_Dataset
 
         # Set up CLAM experiment data directory
         clam_dir = join(self.root, 'clam', exp_name)

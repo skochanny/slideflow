@@ -6,12 +6,12 @@ import gzip
 import io
 import os
 import struct
-import numpy as np
-from typing import Optional, Tuple, Dict, Union, List, Iterable
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-from slideflow.util import log
-from slideflow.util import example_pb2, extract_feature_dict
+import numpy as np
+
 from slideflow.tfrecord import iterator_utils
+from slideflow.util import example_pb2, extract_feature_dict, log
 
 
 class TFRecordIterator:
@@ -123,6 +123,7 @@ class TFRecordIterator:
             else:
                 clip_offset = None
             if self.shard is None and self.random_start:
+                assert self.index is not None
                 offset = np.random.choice(self.index)
                 yield from read_records(offset, clip_offset)
                 yield from read_records(0, offset)
@@ -131,11 +132,11 @@ class TFRecordIterator:
             else:
                 shard_idx, shard_count = self.shard
                 all_shard_indices = np.array_split(self.index, shard_count)
-                start_byte = all_shard_indices[shard_idx][0]
                 if shard_count >= self.index.shape[0]:  # type: ignore
                     # There are fewer records than shards, so
                     # only the first shard will read
                     if shard_idx == 0:
+                        start_byte = all_shard_indices[shard_idx][0]
                         yield from read_records(start_byte, clip_offset)
                         return
                     else:
@@ -144,6 +145,7 @@ class TFRecordIterator:
                     end_byte = all_shard_indices[shard_idx + 1][0]
                 else:
                     end_byte = clip_offset
+                start_byte = all_shard_indices[shard_idx][0]
                 yield from read_records(start_byte, end_byte)
 
     def process(self, record):
