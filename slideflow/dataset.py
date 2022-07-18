@@ -1452,6 +1452,8 @@ class Dataset:
 
             # Assemble results dictionary
             for slide, lbl in zip(filtered_slides, filtered_labels):
+                if slide in sf.util.SLIDE_ANNOTATIONS_TO_IGNORE:
+                    continue
                 if not header_is_float:
                     lbl = _process_cat_label(lbl)
                 if slide in results:
@@ -1565,7 +1567,7 @@ class Dataset:
                     f"Slide {slide} assigned to multiple patients: "
                     f"({patient}, {result[slide]})"
                 )
-            else:
+            elif slide not in sf.util.SLIDE_ANNOTATIONS_TO_IGNORE:
                 result[slide] = patient
         return result
 
