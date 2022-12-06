@@ -218,3 +218,90 @@ def slide_directory_tree(
             paths, to list containing path to duplicates.
     """
     return dict(), None
+
+def get_tfrdir_path(model_path: str):
+    """From a given model path, return the TFR directory containing records 
+    used for model training.
+    
+    Args:
+        model_path (str): Path to model directory
+
+    Returns:
+        tfr_dir_path (str): Path to TFR directory with TFR used for model training ()
+
+    Ex: "/home/data/TFRECORDS/source_dir/299px_302um"
+    
+    """
+
+    raise NotImplementedError
+
+
+def extract_params_from_pdf(pdf_path: str):
+    """Extract tile extraction options from tile_extraction.pdf in TFR directory.
+    
+    Args:
+        pdf_path (str): Path to tile_extraction.pdf 
+
+    Returns:
+        extraction_details (dict): Dictionary containing options used to extract tiles.
+    
+    """
+    # notes: use PyPDF2 to extract
+
+    raise NotImplementedError
+
+def add_extraction_options_tfrdir(model_path, extraction_details):
+    #TODO: slideflow needs to be updated to add these details into params.json when 
+    """Use to retroactively add tile extraction details to extraction_options.json 
+    in TFR directory.
+
+    Args:
+        [[tfr_path]]
+        extraction_details
+
+    Returns:
+        None (just edits params.json)
+    """
+
+    raise NotImplementedError
+
+
+def extract_tiles():
+    # What extract_tiles() function do we want to use & at what level?
+    raise NotImplementedError
+
+def purchase_ingredients():
+    # maybe add optional args to provide locations of already downloaded items (like annotations)
+    """Gather all data ingredients required in recipe (slides, ROIs, annotations). 
+    Download from desired locations. [[Also do verified check to confirm everything downloads (like hashing)]].
+
+    Args:
+        [[store_addresses: Dictionary of locations/parameters of data sources for recipe. (sort of equivalent to datasets.json)]]
+        grocery_list: Dataframe/dict with IDs of data you want to download
+    
+    
+    """
+    raise NotImplementedError
+
+def prep_ingredients():
+    # Imagine at this step we sort of have the structure like described in datasets.json, that contains all data required to prep dataset for training.
+    # Using slide locations +/- ROIs, plus extraction parameters, extract tiles (by calling one of the existing extract_tiles functions). 
+    # We need to provide optional arguments to provide to extract_tiles to decide if tiles should be saved or not.
+    # Create project directory. 
+    '''
+    
+    Args:
+        Format: "tfrecords", "tiles", "both" (or have a save tiles step like in regular tile extraction)
+
+    '''
+    raise NotImplementedError
+
+
+#TODO: Answer question: do we want to have ingredients class? 
+
+
+def wrapped_extract_tiles():
+    # check step to verify that everything looks gucci prior to extracting tiles, offer possibility of making slight edits to params
+    # i.e. step to assert that options from extraction details still match to currently implemented slideflow keyword args. 
+    raise NotImplementedError
+
